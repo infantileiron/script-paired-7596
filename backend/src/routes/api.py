@@ -1,4 +1,5 @@
-import os,json
+import os
+from pathlib import Path
 import redis
 from fastapi import APIRouter,Depends,HTTPException,Response
 from sqlalchemy.exc import IntegrityError
@@ -38,7 +39,9 @@ def evaluations(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.que
 @router.post('/evaluations')
 def evaluate(data:EvaluationInput,u=Depends(editor),s=Depends(db)):
  rows=[dump(r) for r in s.query(Pair).order_by(Pair.id).all() if data.team=='全部' or r.team==data.team]
- r=Evaluation(**data.model_dump(),result={'snapshot':rows});s.add(r);s.commit()
+ settings={'iterations':data.iterations,'batch_size':data.batch_size}
+ r=Evaluation(name=data.name,team=data.team,result={'snapshot':rows,'settings':settings,'completed':0})
+ s.add(r);s.commit()
  try:redis.Redis.from_url(os.environ['REDIS_URL']).rpush('paired:evaluations',r.id)
  except redis.RedisError:r.state='failed';r.error='队列暂不可用，请稍后重新提交';s.commit();raise HTTPException(503,r.error)
  audit(s,u,'提交评估 '+str(r.id));return dump(r)
@@ -47,8 +50,10 @@ def detail(i:int,u=Depends(current),s=Depends(db)):return dump(ensure_evaluation
 @router.get('/evaluations/{i}/export')
 def export(i:int,u=Depends(current),s=Depends(db)):
  r=ensure_evaluation(s,i)
- if r.state!='done':raise HTTPException(409,'仅成功评估可导出')
- return Response(json.dumps(dump(r),ensure_ascii=False,indent=2),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="script-paired-{i}.json"'})
+ if r.state!='done':raise HTTPException(409,'评估未完成，暂不开放导出')
+ artifact=Path(os.environ.get('ARTIFACTS_DIR','/artifacts'))/f'{i}.json'
+ if not artifact.exists():raise HTTPException(409,'结果文件尚未就绪，请稍后刷新重试')
+ return Response(artifact.read_text(encoding='utf-8'),media_type='application/json',headers={'Content-Disposition':f'attachment; filename="script-paired-{i}.json"'})
 @router.get('/adoptions')
 def adoptions(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(Adoption).order_by(Adoption.id.desc()).all()]
 @router.post('/adoptions')
